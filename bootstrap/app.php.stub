@@ -1,0 +1,34 @@
+<?php
+
+/*
+|--------------------------------------------------------------------------
+| bootstrap/app.php — YLC Additions
+|--------------------------------------------------------------------------
+| Merge the withMiddleware() call below into your existing bootstrap/app.php.
+| Do NOT replace the file — integrate the aliases and groups into
+| the existing ->withMiddleware(function (Middleware $middleware) { ... }) block.
+|--------------------------------------------------------------------------
+
+Example integration:
+
+    ->withMiddleware(function (Middleware $middleware) {
+        // ... existing Inertia / Fortify middleware ...
+
+        // YLC: DDoS protection on all web routes
+        $middleware->web(append: [
+            \App\Http\Middleware\DDoSProtection::class,
+            \App\Http\Middleware\BanCheck::class,
+        ]);
+
+        // YLC: Named middleware aliases
+        $middleware->alias([
+            'staff' => \App\Http\Middleware\StaffAccess::class,
+            'admin' => \App\Http\Middleware\AdminAccess::class,
+            'ylc.ban' => \App\Http\Middleware\BanCheck::class,
+        ]);
+    })
+
+*/
+
+// This file is intentionally a documentation stub.
+// Apply the changes above to your real bootstrap/app.php.
