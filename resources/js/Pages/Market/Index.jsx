@@ -13,109 +13,96 @@ export default function MarketIndex({ listings, filters }) {
 
     function handleBuy(listingId) {
         if (!user) { router.visit('/login'); return; }
-        if (!confirm('Buy this item?')) return;
+        if (!confirm('Purchase this item?')) return;
         setBusy(listingId);
         router.post(`/market/${listingId}/buy`, {}, { onFinish: () => setBusy(null) });
     }
 
     function handleCancel(listingId) {
-        if (!confirm('Cancel your listing?')) return;
+        if (!confirm('Cancel this listing?')) return;
         router.post(`/market/${listingId}/cancel`);
     }
 
     return (
         <Layout>
-            <div className="mx-auto max-w-5xl px-4 sm:px-6 py-8">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div className="page">
+                <div className="page-header">
                     <div>
-                        <h1 className="text-3xl font-black text-white">Market</h1>
-                        <p className="text-gray-400 text-sm mt-1">Buy and sell limited items between players</p>
+                        <h1>Market</h1>
+                        <div className="page-header__sub">Buy and sell limited items</div>
                     </div>
-                    {user && (
-                        <a href="/avatar" className="text-sm text-indigo-400 hover:text-indigo-300 transition-colors">
-                            Manage inventory → Avatar
-                        </a>
-                    )}
+                    {user && <a href="/avatar" className="btn btn--ghost btn--sm">Sell from Inventory</a>}
                 </div>
 
-                {/* Search */}
-                <div className="flex gap-2 mb-6">
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
                     <input
-                        type="text"
-                        placeholder="🔍 Search market…"
+                        type="text" className="input"
+                        placeholder="Search market..."
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && router.get('/market', { search }, { preserveState: true, replace: true })}
-                        className="flex-1 bg-gray-800 border border-white/10 rounded-lg px-4 py-2 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                        style={{ maxWidth: 320 }}
                     />
-                    <button
-                        onClick={() => router.get('/market', { search }, { preserveState: true, replace: true })}
-                        className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-500 transition-colors"
-                    >
+                    <button className="btn btn--primary" onClick={() => router.get('/market', { search }, { preserveState: true, replace: true })}>
                         Search
                     </button>
                 </div>
 
-                {/* Listings */}
                 {listings.data.length === 0 ? (
-                    <div className="text-center py-20">
-                        <span className="text-5xl">📭</span>
-                        <p className="text-gray-400 mt-4">No listings available.</p>
-                        <a href="/catalog" className="text-indigo-400 text-sm mt-2 inline-block hover:underline">Browse catalog to find items →</a>
+                    <div className="card" style={{ padding: '3rem', textAlign: 'center' }}>
+                        <p className="text-muted">No listings available.</p>
+                        <a href="/catalog" className="btn btn--ghost btn--sm" style={{ marginTop: '0.75rem', display: 'inline-flex' }}>Browse Catalog</a>
                     </div>
                 ) : (
-                    <div className="rounded-2xl border border-white/10 bg-gray-800 overflow-hidden">
-                        <table className="w-full text-sm">
+                    <div className="card" style={{ overflow: 'hidden' }}>
+                        <table className="table">
                             <thead>
-                                <tr className="border-b border-white/10 text-gray-400 text-xs uppercase tracking-wider">
-                                    <th className="px-4 py-3 text-left">Item</th>
-                                    <th className="px-4 py-3 text-left hidden sm:table-cell">Category</th>
-                                    <th className="px-4 py-3 text-left hidden md:table-cell">Seller</th>
-                                    <th className="px-4 py-3 text-right">Price</th>
-                                    <th className="px-4 py-3 text-right hidden md:table-cell">RAP</th>
-                                    <th className="px-4 py-3"></th>
+                                <tr>
+                                    <th>Item</th>
+                                    <th>Category</th>
+                                    <th>Seller</th>
+                                    <th style={{ textAlign: 'right' }}>Price</th>
+                                    <th style={{ textAlign: 'right' }}>RAP</th>
+                                    <th style={{ textAlign: 'right' }}></th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-white/5">
-                                {listings.data.map(listing => (
-                                    <tr key={listing.id} className="hover:bg-white/5 transition-colors">
-                                        <td className="px-4 py-3">
-                                            <div className="flex items-center gap-3">
-                                                {listing.item?.thumbnail_url ? (
-                                                    <img src={listing.item.thumbnail_url} alt="" className="w-10 h-10 rounded-lg object-contain bg-gray-700" />
-                                                ) : (
-                                                    <div className="w-10 h-10 rounded-lg bg-gray-700 flex items-center justify-center text-lg">🎁</div>
-                                                )}
-                                                <a href={`/catalog/${listing.item_id}`} className="font-semibold text-white hover:text-indigo-300 transition-colors">
-                                                    {listing.item?.name ?? '—'}
-                                                </a>
+                            <tbody>
+                                {listings.data.map(l => (
+                                    <tr key={l.id}>
+                                        <td style={{ textAlign: 'left' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                                                <div style={{
+                                                    width: 36, height: 36, borderRadius: 'var(--r-sm)',
+                                                    background: `linear-gradient(135deg, ${l.item?.color_primary ?? '#888'} 50%, ${l.item?.color_secondary ?? '#555'} 50%)`,
+                                                    border: '1px solid var(--border)', flexShrink: 0, overflow: 'hidden',
+                                                }}>
+                                                    {l.item?.thumbnail_url && <img src={l.item.thumbnail_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}
+                                                </div>
+                                                <a href={`/catalog/${l.item_id}`} style={{ fontWeight: 600, color: 'var(--text)' }}>{l.item?.name ?? '—'}</a>
                                             </div>
                                         </td>
-                                        <td className="px-4 py-3 text-gray-400 capitalize hidden sm:table-cell">
-                                            {listing.item?.category ?? '—'}
+                                        <td style={{ textAlign: 'left', color: 'var(--text-3)', fontSize: '0.8rem', textTransform: 'capitalize' }}>
+                                            {l.item?.category ?? '—'}
                                         </td>
-                                        <td className="px-4 py-3 text-gray-400 hidden md:table-cell">{listing.seller?.name ?? '—'}</td>
-                                        <td className="px-4 py-3 text-right">
-                                            <span className="font-black text-amber-400">{listing.price.toLocaleString()} K</span>
+                                        <td style={{ textAlign: 'left' }}>
+                                            <a href={`/users/${l.seller?.name}`} style={{ color: 'var(--text-2)' }}>{l.seller?.name ?? '—'}</a>
                                         </td>
-                                        <td className="px-4 py-3 text-right text-gray-500 text-xs hidden md:table-cell">
-                                            {listing.item?.rap > 0 ? `${listing.item.rap.toLocaleString()} K` : '—'}
+                                        <td style={{ textAlign: 'right', fontWeight: 800, color: 'var(--accent)' }}>
+                                            {Number(l.price).toLocaleString()} K
                                         </td>
-                                        <td className="px-4 py-3 text-right">
-                                            {user && user.id === listing.seller_id ? (
-                                                <button
-                                                    onClick={() => handleCancel(listing.id)}
-                                                    className="px-3 py-1.5 rounded-lg bg-gray-700 text-gray-300 text-xs font-semibold hover:bg-red-600/30 hover:text-red-300 transition-colors"
-                                                >
-                                                    Cancel
-                                                </button>
+                                        <td style={{ textAlign: 'right', fontSize: '0.78rem', color: 'var(--text-3)' }}>
+                                            {l.item?.rap > 0 ? `${Number(l.item.rap).toLocaleString()} K` : '—'}
+                                        </td>
+                                        <td style={{ textAlign: 'right' }}>
+                                            {user && user.id === l.seller_id ? (
+                                                <button onClick={() => handleCancel(l.id)} className="btn btn--ghost btn--sm">Cancel</button>
                                             ) : (
                                                 <button
-                                                    onClick={() => handleBuy(listing.id)}
-                                                    disabled={busy === listing.id}
-                                                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-gray-900 text-xs font-bold hover:bg-amber-400 disabled:opacity-50 transition-colors"
+                                                    onClick={() => handleBuy(l.id)}
+                                                    disabled={busy === l.id || !user}
+                                                    className="btn btn--primary btn--sm"
                                                 >
-                                                    {busy === listing.id ? '…' : 'Buy'}
+                                                    {busy === l.id ? '...' : 'Buy'}
                                                 </button>
                                             )}
                                         </td>
@@ -135,11 +122,10 @@ export default function MarketIndex({ listings, filters }) {
 function Pagination({ links }) {
     if (!links || links.length <= 3) return null;
     return (
-        <div className="flex flex-wrap gap-1 mt-6 justify-center">
-            {links.map((link, i) => (
-                <button key={i} disabled={!link.url || link.active} onClick={() => link.url && router.visit(link.url)}
-                    dangerouslySetInnerHTML={{ __html: link.label }}
-                    className={`px-3 py-1.5 rounded-lg text-sm transition-all ${link.active ? 'bg-indigo-600 text-white font-bold' : !link.url ? 'text-gray-600 cursor-default' : 'bg-gray-800 text-gray-300 border border-white/10 hover:border-indigo-500/50 cursor-pointer'}`}
+        <div className="pagination">
+            {links.map((l, i) => (
+                <button key={i} disabled={!l.url || l.active} className={l.active ? 'active' : ''}
+                    onClick={() => l.url && router.visit(l.url)} dangerouslySetInnerHTML={{ __html: l.label }}
                 />
             ))}
         </div>

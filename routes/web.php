@@ -45,6 +45,10 @@ Route::get('/forum/{category}/{thread}',                [ForumController::class,
 // Authenticated
 Route::middleware(['auth', 'ylc.ban'])->group(function () {
 
+Route::post('/avatar/thumbnail', [\App\Http\Controllers\AvatarController::class, 'regenerateThumbnail'])
+    ->name('avatar.thumbnail')
+    ->middleware('throttle:30,1');
+
     // Catalog purchase
     Route::post('/catalog/{item}/purchase', [ItemController::class, 'purchase'])
         ->name('catalog.purchase')->whereNumber('item')->middleware('throttle:10,1');

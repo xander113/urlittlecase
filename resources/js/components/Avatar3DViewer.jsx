@@ -3,14 +3,10 @@ import * as THREE from 'three';
 import { OBJLoader }     from 'three/addons/loaders/OBJLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-/* ─── Constants ──────────────────────────────────────────────────────────── */
+/* ─── Constants ─────────────────────────────────────────────────────────────── */
 
-const DEFAULT_COLOR = 0xD9D9D9;
+const DEFAULT_HEX = 0xD9D9D9;
 
-/**
- * Maps OBJ object names to clothing slots.
- * A mesh can appear in multiple slots (e.g. shirt covers torso + arms).
- */
 const PART_SLOTS = {
     head:      ['face'],
     torso:     ['shirt'],
@@ -20,133 +16,129 @@ const PART_SLOTS = {
     right_leg: ['pants'],
 };
 
-/* ─── Helpers ────────────────────────────────────────────────────────────── */
+/* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
-function hex(str) {
-    if (!str) return DEFAULT_COLOR;
+function hexNum(str) {
+    if (!str) return DEFAULT_HEX;
     return parseInt(str.replace('#', ''), 16);
 }
 
-/**
- * MeshPhongMaterial is used instead of MeshStandardMaterial because:
- * 1. It does not require an environment map or high-intensity lighting.
- * 2. OBJ files loaded without MTL will render solid color — no black/wireframe.
- * 3. computeVertexNormals() is called on every geometry to prevent flat shading.
- */
-function makeMat(color, shininess = 18) {
+/** MeshPhongMaterial — reliable on untextured OBJ without envmap. */
+function makeMat(color, shininess = 20) {
     return new THREE.MeshPhongMaterial({
         color,
         shininess,
-        specular: new THREE.Color(0x1a1a1a),
+        specular: new THREE.Color(0x181818),
         flatShading: false,
     });
 }
 
-function getPartColor(partName, bodyColor, slotColors) {
-    const slots = PART_SLOTS[partName] ?? [];
-    for (const slot of slots) {
-        if (slotColors[slot]) return hex(slotColors[slot].primary);
+function partColor(partName, bodyColor, slotColors) {
+    for (const slot of PART_SLOTS[partName] ?? []) {
+        if (slotColors[slot]) return hexNum(slotColors[slot].primary);
     }
-    return hex(bodyColor);
+    return hexNum(bodyColor);
 }
 
-/* ─── Attachment point calculator ───────────────────────────────────────────
- * For each body-part mesh, computes the world-space bounding box AFTER the
- * parent group's transform is applied. This gives us exact positions for
- * hat/shoe/accessory placement — mirroring Roblox's attachment system.
+/** World-space bounding box — requires updateMatrixWorld to have been called first. */
+function getBounds(mesh) {
+    return new THREE.Box3().setFromObject(mesh);
+}
+
+/* ─── Make a DirectionalLight with position — correct way ───────────────────── */
+/**
+ * NEVER use Object.assign to set position on a Three.js object.
+ * Object3D.position is declared with Object.defineProperty and has no setter —
+ * it is a read-only reference to a Vector3 that must be mutated in-place via
+ * .position.set() / .position.copy() / .position.x = … etc.
+ * Object.assign tries to overwrite the property itself, throwing TypeError.
  */
-function getPartBounds(mesh) {
-    const box = new THREE.Box3().setFromObject(mesh);
-    return box;
+function makeLight(color, intensity, x, y, z) {
+    const light = new THREE.DirectionalLight(color, intensity);
+    light.position.set(x, y, z);   // ← mutate in-place, never assign whole Vector3
+    return light;
 }
 
-/* ─── Clothing extras builder ────────────────────────────────────────────── */
+/* ─── Clothing extras ────────────────────────────────────────────────────────── */
 
 function buildExtras(scene, meshMap, slotColors, stateRef) {
-    // Clean up old extras
+    // Dispose old
     stateRef.current.extras.forEach(obj => {
         scene.remove(obj);
         obj.traverse(c => {
-            if (c.geometry) c.geometry.dispose();
-            if (c.material) c.material.dispose();
+            c.geometry?.dispose();
+            if (c.material) {
+                Array.isArray(c.material) ? c.material.forEach(m => m.dispose()) : c.material.dispose();
+            }
         });
     });
     stateRef.current.extras = [];
 
+    if (!Object.keys(meshMap).length) return;
+
     const extras = [];
 
-    /* ── Hat ──────────────────────────────────────────────────────────────
-     * Placed at the TOP-CENTER of the head mesh bounding box.
-     * X and Z are the bounding-box center (not origin) of the head.
-     * Y is headBounds.max.y + half hat height → sits perfectly on top.
-     */
+    /* Hat — crown sits exactly on top of head world-space bounding box */
     if (slotColors.hat && meshMap.head) {
-        const headBounds = getPartBounds(meshMap.head);
-        const headCX = (headBounds.min.x + headBounds.max.x) / 2;
-        const headCZ = (headBounds.min.z + headBounds.max.z) / 2;
-        const headTop = headBounds.max.y;
-        const headW   = headBounds.max.x - headBounds.min.x;
-        const headD   = headBounds.max.z - headBounds.min.z;
+        const b      = getBounds(meshMap.head);
+        const headCX = (b.min.x + b.max.x) / 2;
+        const headCZ = (b.min.z + b.max.z) / 2;
+        const headTop = b.max.y;
+        const headW   = b.max.x - b.min.x;
+        const headD   = b.max.z - b.min.z;
+        const hatH    = headW * 0.80;
+        const hatW    = headW * 0.90;
+        const hatD    = headD * 0.90;
 
-        const hatH  = headW * 0.75;
-        const hatW  = headW * 0.92;
-        const hatD  = headD * 0.92;
-
-        // Crown
         const crown = new THREE.Mesh(
             new THREE.BoxGeometry(hatW, hatH, hatD),
-            makeMat(hex(slotColors.hat.primary), 22)
+            makeMat(hexNum(slotColors.hat.primary), 24)
         );
         crown.position.set(headCX, headTop + hatH / 2, headCZ);
         crown.castShadow = true;
         scene.add(crown);
         extras.push(crown);
 
-        // Brim (flat disc wider than crown, sits at crown base)
         const brim = new THREE.Mesh(
-            new THREE.BoxGeometry(hatW * 1.45, hatH * 0.12, hatD * 1.45),
-            makeMat(hex(slotColors.hat.secondary ?? slotColors.hat.primary), 22)
+            new THREE.BoxGeometry(hatW * 1.5, hatH * 0.10, hatD * 1.5),
+            makeMat(hexNum(slotColors.hat.secondary ?? slotColors.hat.primary), 24)
         );
-        brim.position.set(headCX, headTop + hatH * 0.05, headCZ);
+        brim.position.set(headCX, headTop + hatH * 0.02, headCZ);
         brim.castShadow = true;
         scene.add(brim);
         extras.push(brim);
     }
 
-    /* ── Shoes ─────────────────────────────────────────────────────────── */
+    /* Shoes */
     if (slotColors.shoes) {
-        const legNames = ['left_leg', 'right_leg'];
-        legNames.forEach(name => {
+        ['left_leg', 'right_leg'].forEach(name => {
             if (!meshMap[name]) return;
-            const b = getPartBounds(meshMap[name]);
+            const b  = getBounds(meshMap[name]);
             const cx = (b.min.x + b.max.x) / 2;
             const cz = (b.min.z + b.max.z) / 2;
             const w  = b.max.x - b.min.x;
             const d  = b.max.z - b.min.z;
-            const shoeH = w * 0.28;
-
+            const shH = w * 0.26;
             const shoe = new THREE.Mesh(
-                new THREE.BoxGeometry(w * 1.05, shoeH, d * 1.4),
-                makeMat(hex(slotColors.shoes.primary), 14)
+                new THREE.BoxGeometry(w * 1.08, shH, d * 1.45),
+                makeMat(hexNum(slotColors.shoes.primary), 16)
             );
-            shoe.position.set(cx, b.min.y + shoeH / 2, cz + d * 0.18);
+            shoe.position.set(cx, b.min.y + shH / 2, cz + d * 0.15);
             shoe.castShadow = true;
             scene.add(shoe);
             extras.push(shoe);
         });
     }
 
-    /* ── Accessory (shoulder / wrist item) ─────────────────────────────── */
+    /* Accessory */
     if (slotColors.accessory && meshMap.right_arm) {
-        const b = getPartBounds(meshMap.right_arm);
-        const midY = (b.min.y + b.max.y) / 2;
-        const r    = (b.max.x - b.min.x) * 0.45;
-
+        const b   = getBounds(meshMap.right_arm);
+        const r   = (b.max.x - b.min.x) * 0.42;
         const gem = new THREE.Mesh(
             new THREE.OctahedronGeometry(r, 0),
-            makeMat(hex(slotColors.accessory.primary), 60)
+            makeMat(hexNum(slotColors.accessory.primary), 55)
         );
-        gem.position.set(b.max.x + r * 1.1, midY, (b.min.z + b.max.z) / 2);
+        gem.position.set(b.max.x + r, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2);
         gem.castShadow = true;
         scene.add(gem);
         extras.push(gem);
@@ -155,7 +147,7 @@ function buildExtras(scene, meshMap, slotColors, stateRef) {
     stateRef.current.extras = extras;
 }
 
-/* ─── Component ──────────────────────────────────────────────────────────── */
+/* ─── Component ──────────────────────────────────────────────────────────────── */
 
 export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {}, style, className }) {
     const mountRef = useRef(null);
@@ -165,7 +157,7 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
         extras: [], frameId: null, _onResize: null,
     });
 
-    /* ── Scene init ───────────────────────────────────────────────────── */
+    /* ── Build scene ──────────────────────────────────────────────────────── */
     const buildScene = useCallback(() => {
         const mount = mountRef.current;
         if (!mount) return;
@@ -173,47 +165,39 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
         const W = mount.clientWidth  || 340;
         const H = mount.clientHeight || 460;
 
-        /* Scene */
-        const scene = new THREE.Scene();
-
-        /* Use a plain background that respects dark/light — driven by CSS var
-           via a transparent renderer + CSS background on the mount div.       */
+        const scene    = new THREE.Scene();
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(W, H);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+        renderer.outputColorSpace  = THREE.SRGBColorSpace;
         mount.appendChild(renderer.domElement);
 
-        /* Camera */
         const camera = new THREE.PerspectiveCamera(40, W / H, 0.1, 200);
         camera.position.set(0, 3.5, 12);
 
-        /* Lights — strong ambient prevents the all-black look */
-        const ambient = new THREE.AmbientLight(0xffffff, 1.4);
-        scene.add(ambient);
+        /* ── Lights — use position.set(), never Object.assign ─────────────── */
+        scene.add(new THREE.AmbientLight(0xffffff, 1.5));
 
-        const key = new THREE.DirectionalLight(0xffffff, 1.2);
-        key.position.set(4, 10, 6);
+        // Key light (top-right-front)
+        const key = makeLight(0xffffff, 1.2, 4, 10, 6);
         key.castShadow = true;
         key.shadow.camera.near = 0.1;
         key.shadow.camera.far  = 60;
         key.shadow.mapSize.set(1024, 1024);
         scene.add(key);
 
-        const fill = new THREE.DirectionalLight(0xffffff, 0.55);
-        fill.position.set(-5, 4, -4);
-        scene.add(fill);
+        // Fill light (left)
+        scene.add(makeLight(0xffffff, 0.5, -5, 4, -4));
 
-        const rim = new THREE.DirectionalLight(0xffffff, 0.3);
-        rim.position.set(0, -3, -8);
-        scene.add(rim);
+        // Rim / back light
+        scene.add(makeLight(0xffffff, 0.3, 0, -3, -8));
 
         /* Floor */
         const floor = new THREE.Mesh(
             new THREE.PlaneGeometry(14, 14),
-            new THREE.MeshPhongMaterial({ color: 0xcccccc, shininess: 0 })
+            new THREE.MeshPhongMaterial({ color: 0xd0d0d0, shininess: 0 })
         );
         floor.rotation.x = -Math.PI / 2;
         floor.receiveShadow = true;
@@ -224,7 +208,7 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
         controls.target.set(0, 3, 0);
         controls.enableDamping   = true;
         controls.dampingFactor   = 0.07;
-        controls.minDistance     = 5;
+        controls.minDistance     = 4;
         controls.maxDistance     = 20;
         controls.maxPolarAngle   = Math.PI * 0.80;
         controls.minPolarAngle   = 0.15;
@@ -234,49 +218,39 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
 
         stateRef.current = { ...stateRef.current, scene, camera, renderer, controls };
 
-        /* Load OBJ */
+        /* OBJ */
         const loader = new OBJLoader();
         loader.load(
             '/models/character_model.obj',
             (obj) => {
-                /* Compute bounding box to center & scale */
-                const box    = new THREE.Box3().setFromObject(obj);
-                const center = box.getCenter(new THREE.Vector3());
-                const size   = box.getSize(new THREE.Vector3());
+                const rawBox    = new THREE.Box3().setFromObject(obj);
+                const rawCenter = rawBox.getCenter(new THREE.Vector3());
+                const rawSize   = rawBox.getSize(new THREE.Vector3());
+                const scaleFactor = rawSize.y > 0 ? 7 / rawSize.y : 1;
 
-                /* Scale to 7 world-units tall */
-                const scale = size.y > 0 ? 7 / size.y : 1;
-                obj.scale.setScalar(scale);
-
-                /* Center horizontally, set feet at y=0 */
-                obj.position.x = -center.x * scale;
-                obj.position.y = -box.min.y * scale;
-                obj.position.z = -center.z * scale;
+                obj.scale.setScalar(scaleFactor);
+                // position.set() — correct mutation of read-only Vector3 reference
+                obj.position.set(
+                    -rawCenter.x * scaleFactor,
+                    -rawBox.min.y * scaleFactor,
+                    -rawCenter.z * scaleFactor,
+                );
 
                 const meshMap = {};
-
                 obj.traverse(child => {
                     if (!(child instanceof THREE.Mesh)) return;
+                    child.geometry?.computeVertexNormals();
 
-                    /* Compute normals — prevents flat/dark artifacts */
-                    if (child.geometry) {
-                        child.geometry.computeVertexNormals();
-                    }
-
-                    /* Dispose any material the OBJ loader assigned (may be broken) */
+                    // Dispose any OBJ-loader-assigned material
                     if (child.material) {
-                        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
-                        else child.material.dispose();
+                        Array.isArray(child.material)
+                            ? child.material.forEach(m => m.dispose())
+                            : child.material.dispose();
                     }
 
-                    const partName = child.name.toLowerCase();
-
-                    /* Assign fresh Phong material */
-                    child.material = makeMat(
-                        getPartColor(partName, bodyColor, slotColors)
-                    );
-
-                    child.castShadow    = true;
+                    const partName   = child.name.toLowerCase();
+                    child.material   = makeMat(partColor(partName, bodyColor, slotColors));
+                    child.castShadow = true;
                     child.receiveShadow = true;
                     meshMap[partName]   = child;
                 });
@@ -285,7 +259,8 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
                 stateRef.current.meshMap = meshMap;
                 scene.add(obj);
 
-                /* Now that we have meshes with world positions, build extras */
+                // Force world matrix update before buildExtras computes bounding boxes
+                obj.updateMatrixWorld(true);
                 buildExtras(scene, meshMap, slotColors, stateRef);
             },
             undefined,
@@ -313,7 +288,7 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
         stateRef.current._onResize = onResize;
     }, []); // eslint-disable-line
 
-    /* ── Mount / unmount ──────────────────────────────────────────────── */
+    /* ── Mount / unmount ──────────────────────────────────────────────────── */
     useEffect(() => {
         buildScene();
         return () => {
@@ -321,9 +296,9 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
             if (s.frameId) cancelAnimationFrame(s.frameId);
             window.removeEventListener('resize', s._onResize);
             s.controls?.dispose();
-            s.extras.forEach(obj => {
-                s.scene?.remove(obj);
-                obj.traverse(c => { c.geometry?.dispose(); c.material?.dispose(); });
+            s.extras.forEach(o => {
+                s.scene?.remove(o);
+                o.traverse(c => { c.geometry?.dispose(); c.material?.dispose(); });
             });
             if (s.renderer) {
                 s.renderer.dispose();
@@ -333,16 +308,14 @@ export default function Avatar3DViewer({ bodyColor = '#D9D9D9', slotColors = {},
         };
     }, []); // eslint-disable-line
 
-    /* ── React to prop changes ────────────────────────────────────────── */
+    /* ── Reactive: update colors + extras when props change ───────────────── */
     useEffect(() => {
         const { meshMap, scene } = stateRef.current;
-        if (!scene || Object.keys(meshMap).length === 0) return;
+        if (!scene || !Object.keys(meshMap).length) return;
 
         Object.entries(meshMap).forEach(([partName, mesh]) => {
-            const col = getPartColor(partName, bodyColor, slotColors);
-            if (mesh.material?.color) {
-                mesh.material.color.setHex(col);
-            }
+            const col = partColor(partName, bodyColor, slotColors);
+            if (mesh.material?.color) mesh.material.color.setHex(col);
         });
 
         buildExtras(scene, meshMap, slotColors, stateRef);

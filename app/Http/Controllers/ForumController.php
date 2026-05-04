@@ -18,27 +18,58 @@ use Throwable;
 
 class ForumController extends Controller
 {
-    /* ── Index ───────────────────────────────────────────────────────────── */
+    /* ── Index ────────────────────────────────────────────────────────────── */
+
     public function index(): Response
     {
+        /*
+         * ForumCategory does NOT have a posts() relationship — posts belong to
+         * threads, not categories directly. We use the stored posts_count column
+         * instead of ->withCount(['threads','posts']).
+         *
+         * Bug was: ->withCount(['threads','posts']) on subcategories →
+         *   "Call to undefined method App\Models\ForumCategory::posts()"
+         */
         $categories = ForumCategory::whereNull('parent_id')
             ->orderBy('sort_order')
             ->with([
-                'subcategories' => fn ($q) => $q->withCount(['threads','posts'])
-                    ->with('latestThread.author:id,name'),
+                'subcategories' => fn ($q) => $q
+                    ->withCount('threads')              // ← only threads, not posts
+                    ->with(['latestThread' => fn ($q) => $q
+                        ->with('author:id,name')
+                        ->select('id','category_id','title','slug','author_id','last_post_at')
+                    ])
+                    ->orderBy('sort_order'),
             ])
             ->get();
+
+        // Attach posts_count from the stored column (maintained by storeThread/storeReply)
+        $categories->each(function ($cat) {
+            $cat->subcategories->each(function ($sub) {
+                // posts_count is a real column on forum_categories
+                $sub->makeVisible('posts_count');
+                if ($sub->latestThread) {
+                    $sub->latest_thread = [
+                        'title'       => $sub->latestThread->title,
+                        'slug'        => $sub->latestThread->slug,
+                        'author_name' => $sub->latestThread->author?->name,
+                        'last_post_at'=> $sub->latestThread->last_post_at,
+                    ];
+                }
+            });
+        });
 
         return Inertia::render('Forum/Index', ['categories' => $categories]);
     }
 
-    /* ── Category (board) ────────────────────────────────────────────────── */
+    /* ── Category (board) ─────────────────────────────────────────────────── */
+
     public function category(string $slug): Response
     {
         $category = ForumCategory::where('slug', $slug)->firstOrFail();
 
         $threads = ForumThread::where('category_id', $category->id)
-            ->visible()
+            ->whereNull('deleted_at')
             ->with('author:id,name,avatar_thumbnail,role')
             ->orderByDesc('is_pinned')
             ->orderByDesc('last_post_at')
@@ -47,7 +78,8 @@ class ForumController extends Controller
         return Inertia::render('Forum/Category', compact('category', 'threads'));
     }
 
-    /* ── Thread (show) ───────────────────────────────────────────────────── */
+    /* ── Thread (show) ────────────────────────────────────────────────────── */
+
     public function thread(string $catSlug, string $threadSlug, Request $request): Response
     {
         $category = ForumCategory::where('slug', $catSlug)->firstOrFail();
@@ -55,38 +87,60 @@ class ForumController extends Controller
             ->where('slug', $threadSlug)
             ->firstOrFail();
 
-        // Increment views
         ForumThread::where('id', $thread->id)->increment('views_count');
 
         $posts = ForumPost::where('thread_id', $thread->id)
-            ->with(['author:id,name,avatar_thumbnail,role'])
-            ->withCount(['author as author_posts_count' => fn ($q) => $q->select(DB::raw('count(*)'))->from('forum_posts')->whereColumn('author_id', 'users.id')])
+            ->whereNull('deleted_at')
+            ->with('author:id,name,avatar_thumbnail,role')
             ->orderBy('created_at')
             ->paginate(20);
 
-        // Add post count to each author
-        $posts->getCollection()->transform(function ($post) {
-            $post->author->posts_count = ForumPost::where('author_id', $post->author_id)->count();
+        // Attach per-author post count without withCount (avoids sub-query explosion)
+        $authorIds    = $posts->getCollection()->pluck('author_id')->unique()->filter()->values();
+        $postCounts   = ForumPost::whereIn('author_id', $authorIds)
+            ->selectRaw('author_id, count(*) as cnt')
+            ->groupBy('author_id')
+            ->pluck('cnt', 'author_id');
+
+        $posts->getCollection()->transform(function ($post) use ($postCounts) {
+            if ($post->author) {
+                $post->author->posts_count = $postCounts[$post->author_id] ?? 0;
+            }
             return $post;
         });
 
         return Inertia::render('Forum/Thread', compact('thread', 'posts', 'category'));
     }
 
-    /* ── Create thread form ──────────────────────────────────────────────── */
+    /* ── Create thread form ───────────────────────────────────────────────── */
+
     public function createForm(?string $catSlug = null): Response
     {
+        $user = request()->user();
+
         $categories = ForumCategory::whereNull('parent_id')
             ->orderBy('sort_order')
-            ->with('subcategories:id,name,slug,parent_id,is_locked,is_staff_only')
-            ->get();
+            ->with([
+                'subcategories' => fn ($q) => $q
+                    ->orderBy('sort_order')
+                    ->select('id','name','slug','parent_id','is_locked','is_staff_only'),
+            ])
+            ->get(['id','name','slug']);
+
+        // Filter staff-only boards for regular users
+        $categories->each(function ($cat) use ($user) {
+            $cat->subcategories = $cat->subcategories->filter(function ($sub) use ($user) {
+                return !$sub->is_staff_only || in_array($user?->role, ['moderator','admin']);
+            })->values();
+        });
 
         $preselected = $catSlug ? ForumCategory::where('slug', $catSlug)->first() : null;
 
         return Inertia::render('Forum/Create', compact('categories', 'preselected'));
     }
 
-    /* ── Store thread ────────────────────────────────────────────────────── */
+    /* ── Store thread ─────────────────────────────────────────────────────── */
+
     public function storeThread(string $catSlug, Request $request)
     {
         $category = ForumCategory::where('slug', $catSlug)->firstOrFail();
@@ -103,15 +157,16 @@ class ForumController extends Controller
         ]);
 
         try {
-            DB::transaction(function () use ($category, $user, $validated) {
+            $threadId = null;
+            DB::transaction(function () use ($category, $user, $validated, &$threadId) {
                 $slug = $this->uniqueSlug($validated['title'], $category->id);
 
                 $thread = ForumThread::create([
-                    'category_id'  => $category->id,
-                    'author_id'    => $user->id,
-                    'title'        => $validated['title'],
-                    'slug'         => $slug,
-                    'last_post_at' => now(),
+                    'category_id'         => $category->id,
+                    'author_id'           => $user->id,
+                    'title'               => $validated['title'],
+                    'slug'                => $slug,
+                    'last_post_at'        => now(),
                     'last_post_author_id' => $user->id,
                 ]);
 
@@ -126,23 +181,27 @@ class ForumController extends Controller
                 $category->increment('posts_count');
 
                 broadcast(new ForumThreadCreated($thread, $category))->toOthers();
+                $threadId = $thread->id;
             });
 
             return redirect("/forum/{$catSlug}")->with('success', 'Thread posted!');
         } catch (Throwable $e) {
             Log::error('ForumController::storeThread', ['error' => $e->getMessage()]);
-            return back()->with('error', 'Failed to post thread.');
+            return back()->with('error', 'Failed to post thread. Please try again.');
         }
     }
 
-    /* ── Store reply ─────────────────────────────────────────────────────── */
+    /* ── Store reply ──────────────────────────────────────────────────────── */
+
     public function storeReply(string $catSlug, string $threadSlug, Request $request)
     {
         $category = ForumCategory::where('slug', $catSlug)->firstOrFail();
-        $thread   = ForumThread::where('category_id', $category->id)->where('slug', $threadSlug)->firstOrFail();
+        $thread   = ForumThread::where('category_id', $category->id)
+            ->where('slug', $threadSlug)
+            ->firstOrFail();
         $user     = $request->user();
 
-        if ($thread->is_locked) return back()->with('error', 'Thread is locked.');
+        if ($thread->is_locked) return back()->with('error', 'This thread is locked.');
 
         $validated = $request->validate(['body' => 'required|string|min:1|max:20000']);
 
@@ -161,7 +220,6 @@ class ForumController extends Controller
 
                 broadcast(new ForumPostCreated($post, $thread))->toOthers();
 
-                // Notify thread author
                 if ($thread->author_id !== $user->id) {
                     YlcNotification::send(
                         $thread->author_id, 'forum',
@@ -178,7 +236,8 @@ class ForumController extends Controller
         }
     }
 
-    /* ── Delete post (staff / own post) ──────────────────────────────────── */
+    /* ── Delete post ──────────────────────────────────────────────────────── */
+
     public function deletePost(ForumPost $post, Request $request)
     {
         $user = $request->user();
@@ -186,14 +245,18 @@ class ForumController extends Controller
             return back()->with('error', 'Unauthorized.');
         }
 
-        $post->delete();
-        $post->thread->decrement('posts_count');
-        $post->thread->category->decrement('posts_count');
+        DB::transaction(function () use ($post) {
+            $post->delete();
+            ForumThread::where('id', $post->thread_id)->decrement('posts_count');
+            $cat = ForumThread::find($post->thread_id)?->category;
+            $cat?->decrement('posts_count');
+        });
 
         return back()->with('success', 'Post deleted.');
     }
 
-    /* ── Pin / lock (staff only) ─────────────────────────────────────────── */
+    /* ── Pin / Lock ───────────────────────────────────────────────────────── */
+
     public function pin(string $catSlug, string $threadSlug, Request $request)
     {
         $this->requireStaff($request);
@@ -210,12 +273,14 @@ class ForumController extends Controller
         return back()->with('success', $thread->is_locked ? 'Thread locked.' : 'Thread unlocked.');
     }
 
-    /* ── Helpers ─────────────────────────────────────────────────────────── */
+    /* ── Helpers ──────────────────────────────────────────────────────────── */
 
     private function findThread(string $catSlug, string $threadSlug): ForumThread
     {
         $cat = ForumCategory::where('slug', $catSlug)->firstOrFail();
-        return ForumThread::where('category_id', $cat->id)->where('slug', $threadSlug)->firstOrFail();
+        return ForumThread::where('category_id', $cat->id)
+            ->where('slug', $threadSlug)
+            ->firstOrFail();
     }
 
     private function requireStaff(Request $request): void
@@ -225,7 +290,7 @@ class ForumController extends Controller
 
     private function uniqueSlug(string $title, int $categoryId): string
     {
-        $base = Str::slug($title);
+        $base = Str::slug($title) ?: 'thread';
         $slug = $base;
         $n    = 1;
         while (ForumThread::where('category_id', $categoryId)->where('slug', $slug)->exists()) {

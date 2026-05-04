@@ -43,4 +43,16 @@ class ForumCategory extends Model
     {
         return Str::slug($name);
     }
+
+    public function posts()
+    {
+        return $this->hasManyThrough(
+            ForumPost::class, 
+            ForumThread::class, 
+            'category_id', // Foreign key on the threads table
+            'thread_id',   // Foreign key on the posts table
+            'id',          // Local key on the categories table
+            'id'           // Local key on the threads table
+        );
+    }
 }

@@ -1,0 +1,36 @@
+# YourLittleCase! RCCService — Python dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+# INSTALL ORDER MATTERS — use start.sh or follow the manual steps below.
+#
+# Problem: pyrender==0.1.45 pins PyOpenGL==3.1.0 in its own setup.py.
+#          Listing pyopengl>=3.1.7 here therefore causes a ResolutionImpossible
+#          conflict. Additionally, numpy>=2.0 removes np.infty which pyrender
+#          still references, causing an AttributeError at import time.
+#
+# Solution:
+#   1. Pin numpy<2.0 so pyrender's np.infty usage does not crash.
+#   2. Do NOT list pyopengl here — let pyrender pull the exact version it
+#      needs (3.1.0) when installed with --no-deps workaround in start.sh.
+#   3. Install in two phases (handled by start.sh automatically).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Core (always required) ────────────────────────────────────────────────────
+flask>=3.0.0,<4.0
+Pillow>=10.0.0
+numpy>=1.24.0,<2.0.0       # <2.0 required — numpy 2.x removes np.infty used by pyrender
+
+# ── 3D rendering (optional — service degrades to PIL renderer if absent) ──────
+# Install via start.sh which handles the two-phase install automatically.
+# Manual install:
+#   pip install "numpy<2.0" trimesh
+#   pip install pyrender --no-deps
+#   pip install PyOpenGL==3.1.0 PyOpenGL-accelerate==3.1.0
+trimesh>=4.0.0
+
+# ── Database access (optional — only for /fetch/avatar and pipeline render) ───
+sqlalchemy>=2.0.0
+pymysql>=1.1.0              # MySQL/MariaDB
+psycopg2-binary>=2.9.0      # PostgreSQL
+
+# ── Production server ─────────────────────────────────────────────────────────
+gunicorn>=21.0.0

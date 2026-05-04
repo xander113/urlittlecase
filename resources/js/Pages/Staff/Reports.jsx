@@ -6,8 +6,7 @@ export default function StaffReports({ reports }) {
         if (!confirm('Dismiss this report?')) return;
         router.post(`/staff/reports/${id}/dismiss`);
     }
-
-    function banFromReport(userId, name) {
+    function ban(userId, name) {
         const reason = window.prompt(`Reason for banning ${name}:`);
         if (!reason) return;
         router.post('/staff/bans/ban', { user_id: userId, reason });
@@ -15,108 +14,56 @@ export default function StaffReports({ reports }) {
 
     return (
         <Layout>
-            <div className="mx-auto max-w-4xl px-4 sm:px-6 py-8">
+            <div className="page">
                 <StaffNav current="reports" />
-
-                <div className="flex items-center justify-between mb-6">
-                    <h1 className="text-3xl font-black text-white">📋 Open Reports</h1>
-                    <span className="px-3 py-1 rounded-full bg-red-600/20 text-red-300 text-sm font-bold border border-red-500/30">
-                        {reports.data.length} open
-                    </span>
+                <div className="page-header">
+                    <h1>Reports</h1>
+                    <span className="badge badge--danger">{reports.data.length} open</span>
                 </div>
 
                 {reports.data.length === 0 ? (
-                    <div className="text-center py-20 rounded-2xl border border-white/10 bg-gray-800">
-                        <span className="text-4xl">✅</span>
-                        <p className="text-gray-400 mt-3">No open reports. You're all caught up!</p>
+                    <div className="card" style={{ padding: '3rem', textAlign: 'center' }}>
+                        <p className="text-muted">No open reports.</p>
                     </div>
                 ) : (
-                    <div className="space-y-3">
-                        {reports.data.map(report => (
-                            <div key={report.id} className="rounded-2xl border border-white/10 bg-gray-800 p-5">
-                                {/* Header row */}
-                                <div className="flex items-start justify-between gap-4 mb-3 flex-wrap">
-                                    <div>
-                                        <div className="flex items-center gap-2 flex-wrap text-sm">
-                                            <span className="text-gray-500">#{report.id}</span>
-                                            <span className="text-gray-500">·</span>
-                                            <span className="text-gray-400">
-                                                By <strong className="text-white">{report.reporter?.name ?? '?'}</strong>
-                                            </span>
-                                            {report.reported_user && (
-                                                <>
-                                                    <span className="text-gray-500">·</span>
-                                                    <span className="text-gray-400">
-                                                        Against <strong className="text-white">{report.reported_user.name}</strong>
-                                                        <span className={`ml-1.5 px-1.5 py-0.5 rounded text-xs font-bold ${
-                                                            report.reported_user.is_banned
-                                                                ? 'bg-red-600/30 text-red-300'
-                                                                : 'bg-gray-700 text-gray-400'
-                                                        }`}>
-                                                            {report.reported_user.is_banned ? 'BANNED' : report.reported_user.role}
-                                                        </span>
-                                                    </span>
-                                                </>
-                                            )}
-                                            {report.reported_item_id && (
-                                                <>
-                                                    <span className="text-gray-500">·</span>
-                                                    <a href={`/catalog/${report.reported_item_id}`} className="text-indigo-400 hover:underline">
-                                                        Item #{report.reported_item_id}
-                                                    </a>
-                                                </>
-                                            )}
-                                        </div>
-                                        <p className="text-xs text-gray-600 mt-1">{new Date(report.created_at).toLocaleString()}</p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {reports.data.map(r => (
+                            <div key={r.id} className="card">
+                                <div className="card__header" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
+                                    <div style={{ fontSize: '0.83rem', color: 'var(--text-2)' }}>
+                                        <strong style={{ color: 'var(--text-3)', marginRight: 4 }}>#{r.id}</strong>
+                                        By <strong>{r.reporter?.name ?? '?'}</strong>
+                                        {r.reported_user && (
+                                            <> against <strong>{r.reported_user.name}</strong>
+                                                <span className="badge badge--neutral" style={{ marginLeft: 4, verticalAlign: 'middle' }}>{r.reported_user.role}</span>
+                                                {r.reported_user.is_banned && <span className="badge badge--danger" style={{ marginLeft: 4, verticalAlign: 'middle' }}>banned</span>}
+                                            </>
+                                        )}
+                                        {r.reported_item_id && (
+                                            <> &middot; <a href={`/catalog/${r.reported_item_id}`} style={{ color: 'var(--accent)' }}>Item #{r.reported_item_id}</a></>
+                                        )}
                                     </div>
+                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-3)', marginLeft: 'auto' }}>
+                                        {new Date(r.created_at).toLocaleString()}
+                                    </span>
                                 </div>
-
-                                {/* Content */}
-                                <div className="rounded-xl border border-white/5 bg-gray-900/50 p-3 mb-4">
-                                    <p className="text-white font-semibold text-sm">{report.reason}</p>
-                                    {report.details && (
-                                        <p className="text-gray-400 text-sm mt-1">{report.details}</p>
-                                    )}
+                                <div className="card__body">
+                                    <p className="text-sm fw-600" style={{ color: 'var(--text)', marginBottom: r.details ? '0.25rem' : 0 }}>{r.reason}</p>
+                                    {r.details && <p className="text-sm text-subtle">{r.details}</p>}
                                 </div>
-
-                                {/* Actions */}
-                                <div className="flex flex-wrap gap-2">
-                                    <button
-                                        onClick={() => dismiss(report.id)}
-                                        className="px-3 py-1.5 rounded-lg bg-gray-700 text-gray-300 text-xs font-semibold hover:bg-gray-600 transition-colors"
-                                    >
-                                        ✓ Dismiss
-                                    </button>
-                                    {report.reported_user && !report.reported_user.is_banned && (
-                                        <button
-                                            onClick={() => banFromReport(report.reported_user.id, report.reported_user.name)}
-                                            className="px-3 py-1.5 rounded-lg bg-red-600/20 text-red-300 border border-red-500/30 text-xs font-semibold hover:bg-red-600/30 transition-colors"
-                                        >
-                                            🔨 Ban User
-                                        </button>
+                                <div className="card__footer">
+                                    <button onClick={() => dismiss(r.id)} className="btn btn--ghost btn--sm">Dismiss</button>
+                                    {r.reported_user && !r.reported_user.is_banned && (
+                                        <button onClick={() => ban(r.reported_user.id, r.reported_user.name)} className="btn btn--danger btn--sm">Ban User</button>
                                     )}
-                                    {report.reported_user && report.reported_user.is_banned && (
-                                        <button
-                                            onClick={() => router.post('/staff/bans/unban', { user_id: report.reported_user.id })}
-                                            className="px-3 py-1.5 rounded-lg bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 text-xs font-semibold hover:bg-emerald-600/30 transition-colors"
-                                        >
-                                            ✅ Unban
-                                        </button>
-                                    )}
-                                    {report.reported_item_id && (
-                                        <a
-                                            href={`/catalog/${report.reported_item_id}`}
-                                            className="px-3 py-1.5 rounded-lg bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold hover:bg-indigo-600/30 transition-colors"
-                                        >
-                                            View Item
-                                        </a>
+                                    {r.reported_user && r.reported_user.is_banned && (
+                                        <button onClick={() => router.post('/staff/bans/unban', { user_id: r.reported_user.id })} className="btn btn--secondary btn--sm">Unban</button>
                                     )}
                                 </div>
                             </div>
                         ))}
                     </div>
                 )}
-
                 <Pagination links={reports.links} />
             </div>
         </Layout>
@@ -124,24 +71,10 @@ export default function StaffReports({ reports }) {
 }
 
 function StaffNav({ current }) {
-    const links = [
-        { id: 'index',   href: '/staff',         label: 'Dashboard' },
-        { id: 'reports', href: '/staff/reports',  label: 'Reports'   },
-        { id: 'bans',    href: '/staff/bans',     label: 'Bans'      },
-        { id: 'items',   href: '/staff/items',    label: 'Items'     },
-    ];
     return (
-        <div className="flex gap-1 mb-6 flex-wrap">
-            {links.map(l => (
-                <a key={l.id} href={l.href}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                        current === l.id
-                            ? 'bg-indigo-600 text-white'
-                            : 'text-gray-400 hover:text-white hover:bg-white/10'
-                    }`}
-                >
-                    {l.label}
-                </a>
+        <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+            {[['index','/staff','Dashboard'],['reports','/staff/reports','Reports'],['bans','/staff/bans','Bans'],['items','/staff/items','Items']].map(([id, href, label]) => (
+                <a key={id} href={href} style={{ padding: '0.35rem 0.75rem', borderRadius: 'var(--r-sm)', fontSize: '0.83rem', fontWeight: current === id ? 700 : 400, background: current === id ? 'var(--accent)' : 'var(--bg-3)', color: current === id ? 'var(--accent-text)' : 'var(--text-2)', textDecoration: 'none', border: '1px solid var(--border)' }}>{label}</a>
             ))}
         </div>
     );
@@ -150,12 +83,9 @@ function StaffNav({ current }) {
 function Pagination({ links }) {
     if (!links || links.length <= 3) return null;
     return (
-        <div className="flex flex-wrap gap-1 mt-6 justify-center">
-            {links.map((link, i) => (
-                <button key={i} disabled={!link.url || link.active} onClick={() => link.url && router.visit(link.url)}
-                    dangerouslySetInnerHTML={{ __html: link.label }}
-                    className={`px-3 py-1.5 rounded-lg text-sm ${link.active ? 'bg-indigo-600 text-white font-bold' : !link.url ? 'text-gray-600 cursor-default' : 'bg-gray-800 text-gray-300 border border-white/10 hover:border-indigo-500/50 cursor-pointer'}`}
-                />
+        <div className="pagination">
+            {links.map((l, i) => (
+                <button key={i} disabled={!l.url || l.active} className={l.active ? 'active' : ''} onClick={() => l.url && router.visit(l.url)} dangerouslySetInnerHTML={{ __html: l.label }} />
             ))}
         </div>
     );

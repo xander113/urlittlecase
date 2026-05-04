@@ -1,0 +1,23 @@
+[Unit]
+Description=YourLittleCase! RCCService
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/yourlittlecase
+Environment="PYOPENGL_PLATFORM=osmesa"
+Environment="RCC_HOST=127.0.0.1"
+Environment="RCC_PORT=2089"
+# Set RCC_DB_URL to your full database connection string:
+# Environment="RCC_DB_URL=mysql+pymysql://user:password@127.0.0.1/ylc_production"
+# For PostgreSQL:
+# Environment="RCC_DB_URL=postgresql+psycopg2://user:password@127.0.0.1/ylc_production"
+ExecStart=/var/www/yourlittlecase/rcc_service/start.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
