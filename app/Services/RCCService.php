@@ -4,24 +4,19 @@ namespace App\Services;
 
 use App\Models\Avatar;
 use App\Models\Item;
-use App\Models\UserItem;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Throwable;
 
 /**
- * RCCService — delegates thumbnail rendering to the Python RCC microservice.
+ * RCCService — PHP client for the Python 3D rendering microservice.
  *
- * Browser-facing flow (correct architecture — like Roblox):
- *   Browser → POST /avatar/thumbnail (JSON, axios, CSRF-safe)
- *             → AvatarController::regenerateThumbnail()
- *             → RCCService::renderAvatarFromColors()   ← this class
- *             → Python RCC service (HTTP REST)
- *             → PNG saved to storage, URL returned
+ * Thumbnail types (matching Roblox Avatar Rendering API):
+ *   full_body  Full character, feet to hat
+ *   headshot   Head and shoulders crop
+ *   bust       Waist and up
  *
- * The browser NEVER calls /rcc/soap directly.
- * /rcc/soap is a server-to-server SOAP endpoint for legacy compatibility only.
+ * Sizes: 48, 60, 75, 100, 110, 150, 180, 352, 420, 720
  */
 class RCCService
 {
@@ -31,18 +26,25 @@ class RCCService
     public function __construct()
     {
         $this->baseUrl = rtrim(env('RCC_SERVICE_URL', 'http://127.0.0.1:2089'), '/');
-        $this->timeout = (int) env('RCC_TIMEOUT', 15);
+        $this->timeout = (int) env('RCC_TIMEOUT', 20);
     }
 
-    /* ── Primary REST-based entry points ──────────────────────────────────── */
+    /* ── Primary render methods ───────────────────────────────────────────── */
 
     /**
-     * Render an avatar thumbnail from raw color data (JSON → Python REST).
-     * Used by AvatarController::regenerateThumbnail().
+     * Render an avatar full-body thumbnail from colour data.
+     * Called by AvatarController::regenerateThumbnail() (the live preview endpoint).
      */
-    public function renderAvatarFromColors(string $bodyColor, array $slotColors, int $userId): ?string
-    {
-        // Sanitise slot colors — remove any null/empty slots
+    public function renderAvatarFromColors(
+        string  $bodyColor,
+        array   $slotColors,
+        int     $userId,
+        string  $thumbnailType = 'full_body',
+        int     $size          = 420,
+        float   $yRotDeg       = 0.0,
+        float   $distanceScale = 1.0,
+        ?string $bgColor       = null,
+    ): ?string {
         $clean = array_filter($slotColors, fn ($s) => is_array($s) && !empty($s['primary']));
 
         try {
@@ -51,10 +53,15 @@ class RCCService
             }
 
             $response = Http::timeout($this->timeout)->post("{$this->baseUrl}/render/avatar", [
-                'body_color'  => $bodyColor,
-                'slot_colors' => $clean,
-                'user_id'     => $userId,
-                'save'        => true,
+                'body_color'     => $bodyColor,
+                'slot_colors'    => $clean,
+                'thumbnail_type' => $thumbnailType,
+                'size'           => $size,
+                'y_rot_deg'      => $yRotDeg,
+                'distance_scale' => $distanceScale,
+                'bg_color'       => $bgColor,
+                'user_id'        => $userId,
+                'save'           => true,
             ]);
 
             if ($response->successful() && $url = $response->json('url')) {
@@ -62,8 +69,8 @@ class RCCService
             }
 
             Log::warning('RCCService::renderAvatarFromColors non-200', [
-                'status' => $response->status(),
-                'body'   => substr($response->body(), 0, 200),
+                'status'       => $response->status(),
+                'body_preview' => substr($response->body(), 0, 200),
             ]);
         } catch (Throwable $e) {
             Log::error('RCCService::renderAvatarFromColors', ['error' => $e->getMessage()]);
@@ -73,34 +80,83 @@ class RCCService
     }
 
     /**
-     * Render an avatar thumbnail from a saved Avatar model (pulls colors from relationships).
-     * Used by the GenerateThumbnail job.
+     * Render headshot only — tight crop around head and shoulders.
+     * Used for profile thumbnails, nav bar avatar, user lists.
      */
-    public function renderAvatar(Avatar $avatar, ?int $userId = null): ?string
-    {
+    public function renderHeadshot(
+        string $bodyColor,
+        array  $slotColors,
+        int    $userId,
+        int    $size = 420,
+    ): ?string {
+        return $this->renderAvatarFromColors($bodyColor, $slotColors, $userId, 'headshot', $size);
+    }
+
+    /**
+     * Render bust (waist-up) thumbnail.
+     */
+    public function renderBust(
+        string $bodyColor,
+        array  $slotColors,
+        int    $userId,
+        int    $size = 420,
+    ): ?string {
+        return $this->renderAvatarFromColors($bodyColor, $slotColors, $userId, 'bust', $size);
+    }
+
+    /**
+     * Full pipeline: Python RCC fetches avatar config from DB itself, renders, saves.
+     * Used by the GenerateThumbnail job (post-save async render).
+     */
+    public function renderAvatarForUser(
+        int    $userId,
+        string $thumbnailType = 'full_body',
+        int    $size          = 420,
+    ): ?string {
         try {
             if (!$this->isAlive()) {
-                return $this->fallbackGd($avatar);
+                return null;
             }
 
             $response = Http::timeout($this->timeout)->get(
-                "{$this->baseUrl}/render/avatar/" . ($userId ?? $avatar->user_id)
+                "{$this->baseUrl}/render/avatar/{$userId}",
+                ['type' => $thumbnailType, 'size' => $size]
             );
 
             if ($response->successful() && $url = $response->json('url')) {
                 return $url;
             }
         } catch (Throwable $e) {
-            Log::error('RCCService::renderAvatar', ['error' => $e->getMessage()]);
+            Log::error('RCCService::renderAvatarForUser', ['uid' => $userId, 'error' => $e->getMessage()]);
         }
 
-        return $this->fallbackGd($avatar);
+        return null;
     }
 
     /**
-     * Render an item thumbnail (REST, not SOAP).
+     * Render an Avatar model (with all its relationship data).
+     * Builds slot colors from the avatar's equipped user_items.
      */
-    public function renderItem(Item $item): ?string
+    public function renderAvatar(
+        Avatar $avatar,
+        string $thumbnailType = 'full_body',
+        int    $size          = 420,
+    ): ?string {
+        $slotColors = $this->buildSlotColors($avatar);
+
+        return $this->renderAvatarFromColors(
+            $avatar->body_color ?? '#D9D9D9',
+            $slotColors,
+            $avatar->user_id,
+            $thumbnailType,
+            $size,
+        );
+    }
+
+    /**
+     * Render an item thumbnail.
+     */
+    public function renderItem(Item $item, int $size = 420): ?string
     {
         try {
             if (!$this->isAlive()) {
@@ -112,6 +168,7 @@ class RCCService
                 'color_secondary' => $item->color_secondary ?? '#4338ca',
                 'category'        => $item->category,
                 'item_id'         => $item->id,
+                'size'            => $size,
                 'save'            => true,
             ]);
 
@@ -119,13 +176,32 @@ class RCCService
                 return $url;
             }
         } catch (Throwable $e) {
-            Log::error('RCCService::renderItem', ['error' => $e->getMessage()]);
+            Log::error('RCCService::renderItem', ['item_id' => $item->id, 'error' => $e->getMessage()]);
         }
 
         return $this->fallbackItemGd($item);
     }
 
-    /* ── SOAP endpoint (server-to-server only) ────────────────────────────── */
+    /* ── Supported types/sizes query ──────────────────────────────────────── */
+
+    /**
+     * Return the list of thumbnail types and sizes the Python service supports.
+     */
+    public function getSupportedTypes(): array
+    {
+        try {
+            $res = Http::timeout(5)->get("{$this->baseUrl}/thumbnail/types");
+            if ($res->successful()) return $res->json();
+        } catch (Throwable) {}
+
+        return [
+            'types'    => ['full_body', 'headshot', 'bust'],
+            'sizes'    => [48, 60, 75, 100, 110, 150, 180, 352, 420, 720],
+            'renderer' => 'unknown',
+        ];
+    }
+
+    /* ── WSDL ─────────────────────────────────────────────────────────────── */
 
     public function wsdl(string $serviceUrl): string
     {
@@ -140,21 +216,30 @@ class RCCService
     <xsd:schema targetNamespace="urn:YLCRCCService">
       <xsd:element name="RenderAvatarRequest">
         <xsd:complexType><xsd:sequence>
-          <xsd:element name="user_id"       type="xsd:integer"/>
-          <xsd:element name="body_color"    type="xsd:string"/>
-          <xsd:element name="hat_primary"   type="xsd:string" minOccurs="0"/>
-          <xsd:element name="face_primary"  type="xsd:string" minOccurs="0"/>
-          <xsd:element name="shirt_primary" type="xsd:string" minOccurs="0"/>
-          <xsd:element name="pants_primary" type="xsd:string" minOccurs="0"/>
-          <xsd:element name="shoes_primary" type="xsd:string" minOccurs="0"/>
-          <xsd:element name="acc_primary"   type="xsd:string" minOccurs="0"/>
+          <xsd:element name="user_id"        type="xsd:integer"/>
+          <xsd:element name="body_color"     type="xsd:string"/>
+          <xsd:element name="thumbnail_type" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="size"           type="xsd:integer" minOccurs="0"/>
+          <xsd:element name="y_rot_deg"      type="xsd:float"   minOccurs="0"/>
+          <xsd:element name="distance_scale" type="xsd:float"   minOccurs="0"/>
+          <xsd:element name="bg_color"       type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="hat_primary"    type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="hat_secondary"  type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="face_primary"   type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="shirt_primary"  type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="pants_primary"  type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="shoes_primary"  type="xsd:string"  minOccurs="0"/>
+          <xsd:element name="acc_primary"    type="xsd:string"  minOccurs="0"/>
         </xsd:sequence></xsd:complexType>
       </xsd:element>
       <xsd:element name="RenderAvatarResponse">
         <xsd:complexType><xsd:sequence>
-          <xsd:element name="thumbnail_url" type="xsd:string"/>
-          <xsd:element name="success"       type="xsd:boolean"/>
-          <xsd:element name="error"         type="xsd:string" minOccurs="0"/>
+          <xsd:element name="thumbnail_url"  type="xsd:string"/>
+          <xsd:element name="thumbnail_type" type="xsd:string"/>
+          <xsd:element name="size"           type="xsd:integer"/>
+          <xsd:element name="renderer"       type="xsd:string"/>
+          <xsd:element name="success"        type="xsd:boolean"/>
+          <xsd:element name="error"          type="xsd:string" minOccurs="0"/>
         </xsd:sequence></xsd:complexType>
       </xsd:element>
       <xsd:element name="RenderItemRequest">
@@ -163,13 +248,16 @@ class RCCService
           <xsd:element name="color_primary"    type="xsd:string"/>
           <xsd:element name="color_secondary"  type="xsd:string"/>
           <xsd:element name="category"         type="xsd:string"/>
+          <xsd:element name="size"             type="xsd:integer" minOccurs="0"/>
+          <xsd:element name="bg_color"         type="xsd:string"  minOccurs="0"/>
         </xsd:sequence></xsd:complexType>
       </xsd:element>
       <xsd:element name="RenderItemResponse">
         <xsd:complexType><xsd:sequence>
-          <xsd:element name="thumbnail_url" type="xsd:string"/>
-          <xsd:element name="success"       type="xsd:boolean"/>
-          <xsd:element name="error"         type="xsd:string" minOccurs="0"/>
+          <xsd:element name="thumbnail_url"  type="xsd:string"/>
+          <xsd:element name="renderer"       type="xsd:string"/>
+          <xsd:element name="success"        type="xsd:boolean"/>
+          <xsd:element name="error"          type="xsd:string" minOccurs="0"/>
         </xsd:sequence></xsd:complexType>
       </xsd:element>
     </xsd:schema>
@@ -180,12 +268,10 @@ class RCCService
   <message name="RenderItemOut"><part name="parameters" element="tns:RenderItemResponse"/></message>
   <portType name="YLCRCCPortType">
     <operation name="RenderAvatar">
-      <input message="tns:RenderAvatarIn"/>
-      <output message="tns:RenderAvatarOut"/>
+      <input message="tns:RenderAvatarIn"/><output message="tns:RenderAvatarOut"/>
     </operation>
     <operation name="RenderItem">
-      <input message="tns:RenderItemIn"/>
-      <output message="tns:RenderItemOut"/>
+      <input message="tns:RenderItemIn"/><output message="tns:RenderItemOut"/>
     </operation>
   </portType>
   <binding name="YLCRCCBinding" type="tns:YLCRCCPortType">
@@ -210,16 +296,8 @@ class RCCService
 XML;
     }
 
-    /**
-     * Handle an incoming SOAP XML body.
-     *
-     * Uses DOMDocument (more robust than simplexml for namespace handling),
-     * with libxml_use_internal_errors so we can log the actual parse failure
-     * rather than just returning a generic "Invalid XML" fault.
-     *
-     * All color/text values are XML-escaped before being embedded in the
-     * response XML to prevent injection.
-     */
+    /* ── SOAP handler ─────────────────────────────────────────────────────── */
+
     public function handleSoapRequest(string $rawBody): string
     {
         if (empty(trim($rawBody))) {
@@ -227,42 +305,35 @@ XML;
         }
 
         try {
-            // Use DOMDocument — more permissive and namespace-aware than simplexml
             libxml_use_internal_errors(true);
             libxml_clear_errors();
 
             $dom = new \DOMDocument('1.0', 'UTF-8');
-            $dom->recover = true;   // attempt recovery on minor errors
-
+            $dom->recover = true;
             $loaded = $dom->loadXML($rawBody, LIBXML_NOCDATA | LIBXML_NONET);
 
             if (!$loaded) {
-                $errors = array_map(fn ($e) => trim($e->message), libxml_get_errors());
+                $errs = array_map(fn ($e) => trim($e->message), libxml_get_errors());
                 libxml_clear_errors();
-                Log::warning('RCCService::handleSoapRequest XML parse error', [
-                    'errors' => $errors,
-                    'body_preview' => substr($rawBody, 0, 400),
-                ]);
-                return $this->soapFault('Client', 'XML parse error: ' . implode('; ', array_slice($errors, 0, 2)));
+                Log::warning('RCCService SOAP parse error', ['errors' => $errs, 'preview' => substr($rawBody, 0, 300)]);
+                return $this->soapFault('Client', 'XML parse error: ' . implode('; ', array_slice($errs, 0, 2)));
             }
             libxml_clear_errors();
 
             $xpath = new \DOMXPath($dom);
             $xpath->registerNamespace('soap', 'http://schemas.xmlsoap.org/soap/envelope/');
-            $xpath->registerNamespace('tns',  'urn:YLCRCCService');
 
-            // Find the first child of <soap:Body>
             $bodyChildren = $xpath->query('//soap:Body/*');
             if (!$bodyChildren || $bodyChildren->length === 0) {
                 return $this->soapFault('Client', 'Missing or empty SOAP Body');
             }
 
-            $opNode  = $bodyChildren->item(0);
-            $opName  = $opNode->localName ?? '';
+            $opNode = $bodyChildren->item(0);
+            $opName = $opNode->localName ?? '';
 
             return match (true) {
-                str_contains($opName, 'RenderAvatar') => $this->soapRenderAvatar($dom, $xpath, $opNode),
-                str_contains($opName, 'RenderItem')   => $this->soapRenderItem($dom, $xpath, $opNode),
+                str_contains($opName, 'RenderAvatar') => $this->soapRenderAvatar($xpath, $opNode),
+                str_contains($opName, 'RenderItem')   => $this->soapRenderItem($xpath, $opNode),
                 default => $this->soapFault('Client', "Unknown operation: {$opName}"),
             };
         } catch (Throwable $e) {
@@ -271,34 +342,43 @@ XML;
         }
     }
 
-    /* ── Private SOAP operation handlers ──────────────────────────────────── */
+    /* ── Private helpers ──────────────────────────────────────────────────── */
 
-    private function soapRenderAvatar(\DOMDocument $dom, \DOMXPath $xpath, \DOMNode $opNode): string
+    private function soapRenderAvatar(\DOMXPath $xpath, \DOMNode $opNode): string
     {
         $get = fn (string $tag) => $xpath->query(".//*[local-name()='{$tag}']", $opNode)->item(0)?->textContent ?? '';
 
-        $userId    = (int) ($get('user_id') ?: 0);
-        $bodyColor = $get('body_color') ?: '#D9D9D9';
+        $userId       = (int)   ($get('user_id')        ?: 0);
+        $bodyColor    = $get('body_color')  ?: '#D9D9D9';
+        $thumbType    = $get('thumbnail_type') ?: 'full_body';
+        $size         = (int)   ($get('size')           ?: 420);
+        $yRot         = (float) ($get('y_rot_deg')      ?: 0);
+        $dScale       = (float) ($get('distance_scale') ?: 1.0);
+        $bgColor      = $get('bg_color') ?: null;
 
         $slotColors = [];
         foreach (['hat', 'face', 'shirt', 'pants', 'shoes'] as $slot) {
             $p = $get("{$slot}_primary");
-            if ($p) $slotColors[$slot] = ['primary' => $p, 'secondary' => $get("{$slot}_secondary")];
+            if ($p) $slotColors[$slot] = ['primary' => $p, 'secondary' => $get("{$slot}_secondary") ?: null];
         }
         $acc = $get('acc_primary');
         if ($acc) $slotColors['accessory'] = ['primary' => $acc];
 
-        $url     = $this->renderAvatarFromColors($bodyColor, $slotColors, $userId);
-        $success = !empty($url);
+        $url      = $this->renderAvatarFromColors($bodyColor, $slotColors, $userId, $thumbType, $size, $yRot, $dScale, $bgColor);
+        $success  = !empty($url);
+        $renderer = $this->isAlive() ? '3D' : 'fallback';
 
         return $this->soapResponse('RenderAvatarResponse', [
-            'thumbnail_url' => $url ?? '',
-            'success'       => $success ? 'true' : 'false',
-            'error'         => $success ? '' : 'Render failed',
+            'thumbnail_url'  => $url ?? '',
+            'thumbnail_type' => $thumbType,
+            'size'           => (string) $size,
+            'renderer'       => $renderer,
+            'success'        => $success ? 'true' : 'false',
+            'error'          => $success ? '' : 'Render failed',
         ]);
     }
 
-    private function soapRenderItem(\DOMDocument $dom, \DOMXPath $xpath, \DOMNode $opNode): string
+    private function soapRenderItem(\DOMXPath $xpath, \DOMNode $opNode): string
     {
         $get = fn (string $tag) => $xpath->query(".//*[local-name()='{$tag}']", $opNode)->item(0)?->textContent ?? '';
 
@@ -306,20 +386,45 @@ XML;
         $item   = Item::find($itemId);
 
         if (!$item) {
-            return $this->soapFault('Client', 'Item not found');
+            return $this->soapFault('Client', "Item #{$itemId} not found");
         }
 
-        $url     = $this->renderItem($item);
-        $success = !empty($url);
+        $size = (int) ($get('size') ?: 420);
+        $url  = $this->renderItem($item, $size);
 
         return $this->soapResponse('RenderItemResponse', [
             'thumbnail_url' => $url ?? '',
-            'success'       => $success ? 'true' : 'false',
-            'error'         => $success ? '' : 'Render failed',
+            'renderer'      => $this->isAlive() ? '3D' : 'fallback',
+            'success'       => !empty($url) ? 'true' : 'false',
+            'error'         => empty($url) ? 'Render failed' : '',
         ]);
     }
 
-    /* ── Health check ─────────────────────────────────────────────────────── */
+    private function buildSlotColors(Avatar $avatar): array
+    {
+        $out = [];
+        $map = [
+            'hat'       => $avatar->hat_user_item_id,
+            'face'      => $avatar->face_user_item_id,
+            'shirt'     => $avatar->shirt_user_item_id,
+            'pants'     => $avatar->pants_user_item_id,
+            'shoes'     => $avatar->shoes_user_item_id,
+            'accessory' => $avatar->accessory_user_item_id,
+        ];
+
+        foreach ($map as $slot => $userItemId) {
+            if (!$userItemId) continue;
+            $ui = \App\Models\UserItem::with('item:id,color_primary,color_secondary')->find($userItemId);
+            if ($ui?->item) {
+                $out[$slot] = [
+                    'primary'   => $ui->item->color_primary   ?? '#888888',
+                    'secondary' => $ui->item->color_secondary ?? '#666666',
+                ];
+            }
+        }
+
+        return $out;
+    }
 
     private function isAlive(): bool
     {
@@ -330,25 +435,14 @@ XML;
         }
     }
 
-    /* ── GD fallbacks ─────────────────────────────────────────────────────── */
-
     private function fallbackAvatarUrl(int $userId): ?string
     {
         try {
             $avatar = Avatar::where('user_id', $userId)->first();
             if (!$avatar) return null;
-            return $this->fallbackGd($avatar);
-        } catch (Throwable) {
-            return null;
-        }
-    }
-
-    private function fallbackGd(Avatar $avatar): ?string
-    {
-        try {
             return app(ThumbnailService::class)->generateAvatarThumbnail($avatar);
         } catch (Throwable $e) {
-            Log::error('RCCService fallbackGd', ['error' => $e->getMessage()]);
+            Log::error('RCCService fallbackAvatarUrl', ['error' => $e->getMessage()]);
             return null;
         }
     }
@@ -363,22 +457,15 @@ XML;
         }
     }
 
-    /* ── XML helpers ──────────────────────────────────────────────────────── */
-
-    /**
-     * Build a SOAP response envelope.
-     * All field values are properly XML-escaped with htmlspecialchars.
-     */
-    private function soapResponse(string $opName, array $fields): string
+    private function soapResponse(string $op, array $fields): string
     {
         $inner = '';
-        foreach ($fields as $key => $value) {
-            $safe   = htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
-            $inner .= "<tns:{$key}>{$safe}</tns:{$key}>";
+        foreach ($fields as $k => $v) {
+            $inner .= '<tns:' . $k . '>' . htmlspecialchars((string) $v, ENT_XML1 | ENT_QUOTES, 'UTF-8') . '</tns:' . $k . '>';
         }
         return '<?xml version="1.0" encoding="UTF-8"?>'
             . '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="urn:YLCRCCService">'
-            . "<soap:Body><tns:{$opName}>{$inner}</tns:{$opName}></soap:Body>"
+            . '<soap:Body><tns:' . $op . '>' . $inner . '</tns:' . $op . '></soap:Body>'
             . '</soap:Envelope>';
     }
 
@@ -387,7 +474,7 @@ XML;
         $safe = htmlspecialchars($message, ENT_XML1 | ENT_QUOTES, 'UTF-8');
         return '<?xml version="1.0" encoding="UTF-8"?>'
             . '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
-            . "<soap:Body><soap:Fault><faultcode>{$code}</faultcode><faultstring>{$safe}</faultstring></soap:Fault></soap:Body>"
+            . '<soap:Body><soap:Fault><faultcode>' . $code . '</faultcode><faultstring>' . $safe . '</faultstring></soap:Fault></soap:Body>'
             . '</soap:Envelope>';
     }
 }

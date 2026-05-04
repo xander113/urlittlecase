@@ -49,6 +49,11 @@ Route::post('/avatar/thumbnail', [\App\Http\Controllers\AvatarController::class,
     ->name('avatar.thumbnail')
     ->middleware('throttle:30,1');
 
+// Avatar supported types query — public JSON endpoint
+Route::get('/avatar/types', [\App\Http\Controllers\AvatarController::class, 'types'])
+    ->name('avatar.types')
+    ->withoutMiddleware(['auth', 'ylc.ban']); 
+
     // Catalog purchase
     Route::post('/catalog/{item}/purchase', [ItemController::class, 'purchase'])
         ->name('catalog.purchase')->whereNumber('item')->middleware('throttle:10,1');
